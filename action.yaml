@@ -34,8 +34,6 @@ inputs:
     required: false
     default: 'minimal'
 
-# Caller must provide FTP_HOST / FTP_USER / FTP_PASS via env.
-
 runs:
   using: "composite"
   steps:
@@ -50,7 +48,6 @@ runs:
         echo "============================================================"
         echo "::notice::Starting build & deploy…"
 
-    # Detect project type and package manager/lockfile presence
     - id: detect
       name: Detect project type
       shell: bash
@@ -90,7 +87,6 @@ runs:
         echo "Clean slate     : ${{ inputs.clean-slate }}"
         echo "::endgroup::"
 
-    # If there is package.json: set up Node (with cache if lockfile, otherwise without cache)
     - name: Setup Node (with cache)
       if: steps.detect.outputs.has_pkgjson == 'yes' && steps.detect.outputs.lock != 'none'
       uses: actions/setup-node@v4
@@ -109,7 +105,6 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    # Install deps if we have a JS project
     - name: Install dependencies
       if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
@@ -124,7 +119,6 @@ runs:
             yarn install --frozen-lockfile || yarn install
             ;;
           npm|none)
-            # npm ci requires a lockfile; fall back to npm install when none
             if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
               npm ci
             else
@@ -134,9 +128,6 @@ runs:
         esac
         echo "::endgroup::"
 
-    # Build:
-    # - JS project: run provided build-cmd (default npm run build)
-    # - Static project (no package.json): copy everything except .git/.github into dist/
     - name: Build (JS project)
       if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
@@ -146,15 +137,25 @@ runs:
         ${{ inputs.build-cmd }}
         echo "::endgroup::"
 
+    # ✅ Fixed: robust static packaging without invalid expression syntax
     - name: Build (static project)
       if: steps.detect.outputs.has_pkgjson != 'yes'
       shell: bash
       run: |
         echo "::group::Static packaging"
-        mkdir -p "${{ inputs.local-dir }}"
-        shopt -s dotglob extglob
-        cp -R !(.${{ github.workflow }}|.git|.github|${{ inputs.local-dir%/ }}) "${{ inputs.local-dir }}" 2>/dev/null || true
-        echo "::notice::No package.json detected; packaged static files into '${{ inputs.local-dir }}'."
+        OUT="${{ inputs.local-dir }}"
+        # Normalize OUT to remove a trailing slash for comparisons
+        OUT_BASENAME="$(basename "${OUT%/}")"
+        mkdir -p "$OUT"
+        shopt -s dotglob nullglob
+        for item in * .*; do
+          # Skip current/parent, git metadata, and the output dir itself
+          [[ "$item" == "." || "$item" == ".." ]] && continue
+          [[ "$item" == ".git" || "$item" == ".github" ]] && continue
+          [[ "$item" == "$OUT_BASENAME" ]] && continue
+          cp -R "$item" "$OUT"/ 2>/dev/null || true
+        done
+        echo "::notice::No package.json detected; packaged static files into '${OUT}'."
         echo "::endgroup::"
 
     - name: Write deploy marker
@@ -198,6 +199,6 @@ runs:
         {
           echo "## ❌ Deployment failed"
           echo ""
-          echo "- Check the **Install**/**Build** and **FTP Deploy** steps above."
+          echo "- Check the **Install/Build** and **FTP Deploy** steps above."
           echo "- Common fixes: use relative \`server-dir\` (e.g., \`./\`), verify FTP secrets, or delete \`.ftp-deploy-sync-state.json\` on the server."
         } >> "$GITHUB_STEP_SUMMARY"
