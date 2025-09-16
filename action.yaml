@@ -1,0 +1,70 @@
+name: 'GoDaddy Hosting: Build & FTP Deploy'
+description: 'Build a static site (Vite/React/Next export/etc.) and deploy to GoDaddy shared hosting via FTP/FTPS.'
+author: 'Your Name'
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+
+inputs:
+  server-dir:
+    description: 'Target directory on the FTP server, relative to the FTP root (e.g., ./ or ./subfolder/).'
+    required: true
+  node-version:
+    description: 'Node.js version to use for the build.'
+    required: false
+    default: '20'
+  build-cmd:
+    description: 'Command to build the site.'
+    required: false
+    default: 'npm ci && npm run build'
+  local-dir:
+    description: 'Local build output folder to upload.'
+    required: false
+    default: 'dist/'
+  protocol:
+    description: 'FTP protocol to use: ftp or ftps.'
+    required: false
+    default: 'ftps'
+  clean-slate:
+    description: 'If true, cleans the remote directory before syncing.'
+    required: false
+    default: 'true'
+  log-level:
+    description: 'Log verbosity: minimal | standard | verbose.'
+    required: false
+    default: 'minimal'
+
+# NOTE: Composite actions don’t declare “secrets” directly.
+# Pass FTP_HOST, FTP_USER, FTP_PASS via env when you use this action.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+
+    - name: Build site
+      shell: bash
+      run: ${{ inputs.build-cmd }}
+
+    - name: Write deploy marker (optional)
+      shell: bash
+      run: echo "deployed $GITHUB_SHA at $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "${{ inputs.local-dir }}/__deploy-check.txt"
+
+    - name: FTP Deploy
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+      with:
+        server: ${{ env.FTP_HOST }}
+        username: ${{ env.FTP_USER }}
+        password: ${{ env.FTP_PASS }}
+        protocol: ${{ inputs.protocol }}
+        local-dir: ${{ inputs.local-dir }}
+        server-dir: ${{ inputs.server-dir }}
+        dangerous-clean-slate: ${{ inputs.clean-slate }}
+        log-level: ${{ inputs.log-level }}
