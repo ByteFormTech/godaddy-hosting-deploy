@@ -50,7 +50,7 @@ runs:
         echo "============================================================"
         echo "::notice::Starting build & deploy…"
 
-    # Detect project type & package manager
+    # Detect project type & package manager (lockfile OR packageManager field)
     - id: detect
       name: Detect project type
       shell: bash
@@ -58,12 +58,24 @@ runs:
         has_pkgjson="no"
         manager="none"
         lock="none"
+
         if [ -f package.json ]; then
           has_pkgjson="yes"
+          # Prefer lockfiles first
           if [ -f pnpm-lock.yaml ]; then manager="pnpm"; lock="pnpm-lock.yaml"; fi
           if [ -f yarn.lock ]; then manager="yarn"; lock="yarn.lock"; fi
           if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then manager="npm"; lock="npm-lock"; fi
+
+          # If still none, check packageManager field
+          if [ "$manager" = "none" ]; then
+            if grep -q '"packageManager":[^"]*"pnpm@' package.json 2>/dev/null; then manager="pnpm"; fi
+            if grep -q '"packageManager":[^"]*"yarn@' package.json 2>/dev/null; then manager="${manager:-yarn}"; fi
+            if grep -q '"packageManager":[^"]*"npm@'  package.json 2>/dev/null; then manager="${manager:-npm}";  fi
+            # default to npm if still none but package.json exists
+            if [ "$manager" = "none" ]; then manager="npm"; fi
+          fi
         fi
+
         echo "has_pkgjson=$has_pkgjson" >> "$GITHUB_OUTPUT"
         echo "manager=$manager" >> "$GITHUB_OUTPUT"
         echo "lock=$lock" >> "$GITHUB_OUTPUT"
@@ -115,9 +127,9 @@ runs:
       shell: bash
       run: corepack enable || true
 
-    # Install pnpm only when a pnpm lockfile exists (prevents "pnpm not found")
+    # Install pnpm when manager=pnpm (lockfile or packageManager field)
     - name: Setup pnpm
-      if: steps.detect.outputs.lock == 'pnpm-lock.yaml'
+      if: steps.detect.outputs.manager == 'pnpm'
       uses: pnpm/action-setup@v4
       with:
         version: 9
@@ -133,23 +145,35 @@ runs:
         echo "npm : $(command -v npm  || echo 'not found')"
         echo "::endgroup::"
 
-    # Install dependencies (guarded by actual tool presence)
+    # Install dependencies (use manager; frozen only if lockfile exists)
     - name: Install dependencies
       if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
       run: |
         echo "::group::Install output"
-        if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
-          pnpm install --frozen-lockfile || pnpm install
-        elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
-          yarn install --frozen-lockfile || yarn install
-        elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-          npm ci
-        elif [ -f package.json ]; then
-          npm install
-        else
-          echo "No package manager/lockfile found; skipping install."
-        fi
+        case "${{ steps.detect.outputs.manager }}" in
+          pnpm)
+            if [ "${{ steps.detect.outputs.lock }}" = "pnpm-lock.yaml" ]; then
+              pnpm install --frozen-lockfile || pnpm install
+            else
+              pnpm install
+            fi
+            ;;
+          yarn)
+            if [ "${{ steps.detect.outputs.lock }}" = "yarn.lock" ]; then
+              yarn install --frozen-lockfile || yarn install
+            else
+              yarn install
+            fi
+            ;;
+          npm|none)
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+            ;;
+        esac
         echo "::endgroup::"
 
     # Build JS project
