@@ -34,8 +34,7 @@ inputs:
     required: false
     default: 'minimal'
 
-# NOTE: Composite actions don’t declare “secrets” directly.
-# Pass FTP_HOST, FTP_USER, FTP_PASS via env when you use this action.
+# Pass FTP_HOST, FTP_USER, FTP_PASS via env in the caller workflow.
 
 runs:
   using: "composite"
@@ -43,19 +42,55 @@ runs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Start banner
+      shell: bash
+      run: |
+        echo "============================================================"
+        echo "🚀 GoDaddy Hosting: Build & FTP Deploy"
+        echo "============================================================"
+        echo "::notice::Starting build & deploy…"
+
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
         cache: 'npm'
 
+    - name: Preflight path check
+      shell: bash
+      run: |
+        if [[ "${{ inputs.server-dir }}" == /*home* ]]; then
+          echo "::warning::server-dir looks absolute ('${{ inputs.server-dir }}'). Most FTP roots are chrooted; use relative paths like './' or './subfolder/'."
+        fi
+
+    - name: Show configuration
+      shell: bash
+      run: |
+        echo "::group::Resolved configuration"
+        echo "Node:        ${{ inputs.node-version }}"
+        echo "Build cmd:   ${{ inputs.build-cmd }}"
+        echo "Local dir:   ${{ inputs.local-dir }}"
+        echo "Server dir:  ${{ inputs.server-dir }}"
+        echo "Protocol:    ${{ inputs.protocol }}"
+        echo "Clean slate: ${{ inputs.clean-slate }}"
+        echo "::endgroup::"
+
     - name: Build site
       shell: bash
-      run: ${{ inputs.build-cmd }}
+      run: |
+        echo "::group::Build output"
+        set -e
+        ${{ inputs.build-cmd }}
+        echo "::endgroup::"
 
     - name: Write deploy marker (optional)
       shell: bash
       run: echo "deployed $GITHUB_SHA at $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "${{ inputs.local-dir }}/__deploy-check.txt"
+
+    - name: Pre-deploy log
+      shell: bash
+      run: |
+        echo "::notice::Uploading from '${{ inputs.local-dir }}' → '${{ inputs.server-dir }}' via ${{ inputs.protocol }}"
 
     - name: FTP Deploy
       uses: SamKirkland/FTP-Deploy-Action@v4.3.6
@@ -68,3 +103,29 @@ runs:
         server-dir: ${{ inputs.server-dir }}
         dangerous-clean-slate: ${{ inputs.clean-slate }}
         log-level: ${{ inputs.log-level }}
+
+    - name: Write step summary
+      if: ${{ success() }}
+      shell: bash
+      run: |
+        {
+          echo "## ✅ Deployment complete"
+          echo ""
+          echo "- **Commit:** \`$GITHUB_SHA\`"
+          echo "- **Local dir:** \`${{ inputs.local-dir }}\`"
+          echo "- **Server dir:** \`${{ inputs.server-dir }}\`"
+          echo "- **Protocol:** \`${{ inputs.protocol }}\`"
+          echo ""
+          echo "> Tip: set \`log-level: verbose\` to see per-file sync details."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Error summary
+      if: ${{ failure() }}
+      shell: bash
+      run: |
+        {
+          echo "## ❌ Deployment failed"
+          echo ""
+          echo "- Check the **Build output** and **FTP Deploy** steps above."
+          echo "- Common fixes: use relative \`server-dir\` (e.g., \`./\`), verify FTP secrets, delete \`.ftp-deploy-sync-state.json\` on the server."
+        } >> "$GITHUB_STEP_SUMMARY"
