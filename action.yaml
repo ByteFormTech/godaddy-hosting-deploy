@@ -14,11 +14,11 @@ inputs:
     required: false
     default: '20'
   build-cmd:
-    description: 'Command to build the site.'
+    description: 'Command to build the site. Ignored for static mode unless provided.'
     required: false
-    default: 'npm ci && npm run build'
+    default: 'npm run build'
   local-dir:
-    description: 'Local build output folder to upload.'
+    description: 'Local build output folder to upload (fallback for static mode will create dist/).'
     required: false
     default: 'dist/'
   protocol:
@@ -34,7 +34,7 @@ inputs:
     required: false
     default: 'minimal'
 
-# Pass FTP_HOST, FTP_USER, FTP_PASS via env in the caller workflow.
+# Caller must provide FTP_HOST / FTP_USER / FTP_PASS via env.
 
 runs:
   using: "composite"
@@ -42,7 +42,7 @@ runs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Start banner
+    - name: Banner
       shell: bash
       run: |
         echo "============================================================"
@@ -50,11 +50,23 @@ runs:
         echo "============================================================"
         echo "::notice::Starting build & deploy…"
 
-    - name: Setup Node
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ inputs.node-version }}
-        cache: 'npm'
+    # Detect project type and package manager/lockfile presence
+    - id: detect
+      name: Detect project type
+      shell: bash
+      run: |
+        has_pkgjson="no"
+        manager="none"
+        lock="none"
+        if [ -f package.json ]; then
+          has_pkgjson="yes"
+          if [ -f pnpm-lock.yaml ]; then manager="pnpm"; lock="pnpm-lock.yaml"; fi
+          if [ -f yarn.lock ]; then manager="yarn"; lock="yarn.lock"; fi
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then manager="npm"; lock="npm-lock"; fi
+        fi
+        echo "has_pkgjson=$has_pkgjson" >> "$GITHUB_OUTPUT"
+        echo "manager=$manager" >> "$GITHUB_OUTPUT"
+        echo "lock=$lock" >> "$GITHUB_OUTPUT"
 
     - name: Preflight path check
       shell: bash
@@ -67,15 +79,66 @@ runs:
       shell: bash
       run: |
         echo "::group::Resolved configuration"
-        echo "Node:        ${{ inputs.node-version }}"
-        echo "Build cmd:   ${{ inputs.build-cmd }}"
-        echo "Local dir:   ${{ inputs.local-dir }}"
-        echo "Server dir:  ${{ inputs.server-dir }}"
-        echo "Protocol:    ${{ inputs.protocol }}"
-        echo "Clean slate: ${{ inputs.clean-slate }}"
+        echo "Has package.json: ${{ steps.detect.outputs.has_pkgjson }}"
+        echo "Package manager : ${{ steps.detect.outputs.manager }}"
+        echo "Lockfile        : ${{ steps.detect.outputs.lock }}"
+        echo "Node version    : ${{ inputs.node-version }}"
+        echo "Build cmd       : ${{ inputs.build-cmd }}"
+        echo "Local dir       : ${{ inputs.local-dir }}"
+        echo "Server dir      : ${{ inputs.server-dir }}"
+        echo "Protocol        : ${{ inputs.protocol }}"
+        echo "Clean slate     : ${{ inputs.clean-slate }}"
         echo "::endgroup::"
 
-    - name: Build site
+    # If there is package.json: set up Node (with cache if lockfile, otherwise without cache)
+    - name: Setup Node (with cache)
+      if: steps.detect.outputs.has_pkgjson == 'yes' && steps.detect.outputs.lock != 'none'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ steps.detect.outputs.manager }}
+        cache-dependency-path: |
+          pnpm-lock.yaml
+          yarn.lock
+          package-lock.json
+          npm-shrinkwrap.json
+
+    - name: Setup Node (no cache)
+      if: steps.detect.outputs.has_pkgjson == 'yes' && steps.detect.outputs.lock == 'none'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Install deps if we have a JS project
+    - name: Install dependencies
+      if: steps.detect.outputs.has_pkgjson == 'yes'
+      shell: bash
+      run: |
+        echo "::group::Install output"
+        case "${{ steps.detect.outputs.manager }}" in
+          pnpm)
+            npm i -g pnpm
+            pnpm i --frozen-lockfile || pnpm i
+            ;;
+          yarn)
+            yarn install --frozen-lockfile || yarn install
+            ;;
+          npm|none)
+            # npm ci requires a lockfile; fall back to npm install when none
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+            ;;
+        esac
+        echo "::endgroup::"
+
+    # Build:
+    # - JS project: run provided build-cmd (default npm run build)
+    # - Static project (no package.json): copy everything except .git/.github into dist/
+    - name: Build (JS project)
+      if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
       run: |
         echo "::group::Build output"
@@ -83,7 +146,18 @@ runs:
         ${{ inputs.build-cmd }}
         echo "::endgroup::"
 
-    - name: Write deploy marker (optional)
+    - name: Build (static project)
+      if: steps.detect.outputs.has_pkgjson != 'yes'
+      shell: bash
+      run: |
+        echo "::group::Static packaging"
+        mkdir -p "${{ inputs.local-dir }}"
+        shopt -s dotglob extglob
+        cp -R !(.${{ github.workflow }}|.git|.github|${{ inputs.local-dir%/ }}) "${{ inputs.local-dir }}" 2>/dev/null || true
+        echo "::notice::No package.json detected; packaged static files into '${{ inputs.local-dir }}'."
+        echo "::endgroup::"
+
+    - name: Write deploy marker
       shell: bash
       run: echo "deployed $GITHUB_SHA at $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "${{ inputs.local-dir }}/__deploy-check.txt"
 
@@ -104,7 +178,7 @@ runs:
         dangerous-clean-slate: ${{ inputs.clean-slate }}
         log-level: ${{ inputs.log-level }}
 
-    - name: Write step summary
+    - name: ✅ Summary
       if: ${{ success() }}
       shell: bash
       run: |
@@ -115,17 +189,15 @@ runs:
           echo "- **Local dir:** \`${{ inputs.local-dir }}\`"
           echo "- **Server dir:** \`${{ inputs.server-dir }}\`"
           echo "- **Protocol:** \`${{ inputs.protocol }}\`"
-          echo ""
-          echo "> Tip: set \`log-level: verbose\` to see per-file sync details."
         } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Error summary
+    - name: ❌ Summary (failure)
       if: ${{ failure() }}
       shell: bash
       run: |
         {
           echo "## ❌ Deployment failed"
           echo ""
-          echo "- Check the **Build output** and **FTP Deploy** steps above."
-          echo "- Common fixes: use relative \`server-dir\` (e.g., \`./\`), verify FTP secrets, delete \`.ftp-deploy-sync-state.json\` on the server."
+          echo "- Check the **Install**/**Build** and **FTP Deploy** steps above."
+          echo "- Common fixes: use relative \`server-dir\` (e.g., \`./\`), verify FTP secrets, or delete \`.ftp-deploy-sync-state.json\` on the server."
         } >> "$GITHUB_STEP_SUMMARY"
