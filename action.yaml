@@ -50,7 +50,7 @@ runs:
         echo "============================================================"
         echo "::notice::Starting build & deploy…"
 
-    # Detect project type & package manager (lockfile OR packageManager field)
+    # Detect project type & package manager (lockfile OR `packageManager`)
     - id: detect
       name: Detect project type
       shell: bash
@@ -69,8 +69,8 @@ runs:
           # If still none, check packageManager field
           if [ "$manager" = "none" ]; then
             if grep -q '"packageManager":[^"]*"pnpm@' package.json 2>/dev/null; then manager="pnpm"; fi
-            if grep -q '"packageManager":[^"]*"yarn@' package.json 2>/dev/null; then manager="${manager:-yarn}"; fi
-            if grep -q '"packageManager":[^"]*"npm@'  package.json 2>/dev/null; then manager="${manager:-npm}";  fi
+            if grep -q '"packageManager":[^"]*"yarn@' package.json 2>/dev/null && [ "$manager" = "none" ]; then manager="yarn"; fi
+            if grep -q '"packageManager":[^"]*"npm@'  package.json 2>/dev/null && [ "$manager" = "none" ]; then manager="npm";  fi
             # default to npm if still none but package.json exists
             if [ "$manager" = "none" ]; then manager="npm"; fi
           fi
@@ -102,7 +102,7 @@ runs:
         echo "Clean slate     : ${{ inputs.clean-slate }}"
         echo "::endgroup::"
 
-    # Setup Node (with cache if a lockfile exists)
+    # Setup Node (use cache only when a lockfile exists)
     - name: Setup Node (with cache)
       if: steps.detect.outputs.has_pkgjson == 'yes' && steps.detect.outputs.lock != 'none'
       uses: actions/setup-node@v4
@@ -127,14 +127,27 @@ runs:
       shell: bash
       run: corepack enable || true
 
-    # Install pnpm when manager=pnpm (lockfile or packageManager field)
-    - name: Setup pnpm
+    # Install pnpm when manager=pnpm (lockfile OR packageManager field)
+    - name: Setup pnpm (official)
       if: steps.detect.outputs.manager == 'pnpm'
       uses: pnpm/action-setup@v4
       with:
         version: 9
 
-    # Diagnostics to show what's on PATH (helps users debug)
+    # Fallback: guarantee pnpm is on PATH even if previous step failed
+    - name: Ensure pnpm on PATH (fallback)
+      if: steps.detect.outputs.manager == 'pnpm'
+      shell: bash
+      run: |
+        if ! command -v pnpm >/dev/null 2>&1; then
+          echo "pnpm not found after action-setup; installing globally as fallback…"
+          npm install -g pnpm
+          echo "$(npm config get prefix)/bin" >> "$GITHUB_PATH"
+        fi
+        echo "pnpm resolved at: $(command -v pnpm || echo 'not found')"
+        pnpm --version || true
+
+    # Diagnostics to show what's on PATH
     - name: Tooling diagnostics
       if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
@@ -145,7 +158,7 @@ runs:
         echo "npm : $(command -v npm  || echo 'not found')"
         echo "::endgroup::"
 
-    # Install dependencies (use manager; frozen only if lockfile exists)
+    # Install dependencies (use manager; 'frozen' only if a lockfile exists)
     - name: Install dependencies
       if: steps.detect.outputs.has_pkgjson == 'yes'
       shell: bash
