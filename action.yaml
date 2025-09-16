@@ -1,6 +1,6 @@
 name: 'GoDaddy Hosting: Build & FTP Deploy'
 description: 'Build a static site (Vite/React/Next export/etc.) and deploy to GoDaddy shared hosting via FTP/FTPS.'
-author: 'Your Name'
+author: 'GoDaddy'
 branding:
   icon: 'upload-cloud'
   color: 'blue'
